@@ -41,6 +41,7 @@ thuum --known
 Available Words of Power
 
 The following dragon words are available in Apocrypha and may be learned during a session:
+
     {"FUS", "Force", 0},
     {"RO",  "Balance", 0},
     {"DAH", "Push", 0},
