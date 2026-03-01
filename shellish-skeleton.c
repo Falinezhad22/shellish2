@@ -308,7 +308,7 @@ int prompt(struct command_t *command) {
 
   parse_command(buf, command);
 
-  print_command(command); // DEBUG: uncomment for debugging
+  // print_command(command); // DEBUG: uncomment for debugging
 
   // restore the old settings
   tcsetattr(STDIN_FILENO, TCSANOW, &backup_termios);
@@ -412,7 +412,7 @@ static void redirect(const struct command_t *command) {
   }
 }
 
-static int pipe_two(struct command_t *command) {
+/*static int pipe_two(struct command_t *command) {
   int fd[2];
   pid_t pid1, pid2;
 
@@ -480,6 +480,98 @@ static int pipe_two(struct command_t *command) {
   }
 
   return SUCCESS;
+} */
+
+static int pipe_chain(struct command_t *command) {
+  struct command_t *curr = command;
+
+  int prev_read = -1;   // previous pipe
+  int fd[2];            // current pipe
+
+  pid_t pids[256];
+  int pid_count = 0;
+
+  while (curr != NULL) {
+    int has_next = (curr->next != NULL);
+
+    // Create pipe only if there's a next command
+    if (has_next) {
+      if (pipe(fd) == -1) {
+        fprintf(stderr, "Pipe failed\n");
+        if (prev_read != -1) close(prev_read);
+        return SUCCESS;
+      }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("fork");
+      if (has_next) {
+        close(fd[READ_END]);
+        close(fd[WRITE_END]);
+      }
+      if (prev_read != -1) close(prev_read);
+      return SUCCESS;
+    }
+
+    if (pid == 0) {
+      //child bit
+
+      // if exists, stdin from previous pipe
+      if (prev_read != -1) {
+        if (dup2(prev_read, STDIN_FILENO) < 0) {
+          perror("dup2");
+          _exit(1);
+        }
+      }
+
+      // stdout to next pipe, if any
+      if (has_next) {
+        close(fd[READ_END]);
+        if (dup2(fd[WRITE_END], STDOUT_FILENO) < 0) {
+          perror("dup2");
+          _exit(1);
+        }
+        close(fd[WRITE_END]);
+      }
+
+      if (prev_read != -1) close(prev_read);
+
+    
+      redirect(curr);
+
+      pathfinder(curr->name, curr->args);
+      _exit(127);
+    }
+
+    //parent bit
+    if (pid_count < 256) pids[pid_count++] = pid;
+
+    // parent closes previous read end
+    if (prev_read != -1) {
+      close(prev_read);
+      prev_read = -1;
+    }
+
+    // parent keeping present READ_END for next stage; closes WRITE_END
+    if (has_next) {
+      close(fd[WRITE_END]);
+      prev_read = fd[READ_END];
+    }
+
+    curr = curr->next;
+  }
+
+  // Foreground waiting for all pipes
+  if (!command->background) {
+    for (int i = 0; i < pid_count; i++) {
+      waitpid(pids[i], NULL, 0);
+    }
+  } else {
+    if (pid_count > 0) printf("[bg] pid %d\n", pids[pid_count - 1]);
+  }
+
+  return SUCCESS;
 }
 
 int process_command(struct command_t *command) {
@@ -504,7 +596,7 @@ int process_command(struct command_t *command) {
   }
 
   if (command->next != NULL) {
-    return pipe_two(command);
+    return pipe_chain(command);
   }
 
 
