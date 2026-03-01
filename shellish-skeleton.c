@@ -11,7 +11,7 @@
 #include <fcntl.h>
 #define READ_END 0
 #define WRITE_END 1
-//#define _POSIX_C_SOURC 200809L
+//#define _POSIX_C_SOURCE 200809L
 
 const char *sysname = "shellish";
 
@@ -30,6 +30,10 @@ struct command_t {
   char *redirects[3];     // in/out redirection
   struct command_t *next; // for piping
 };
+static int builtin_cut(struct command_t *command);
+static int run_cut_builtin(struct command_t *command);
+static int parser(const char *s, int *fields, int max_fields);
+static void cut_line(const char *line, char delim, const int *fields, int nfields);
 
 /**
  * Prints a command struct
@@ -482,6 +486,7 @@ static void redirect(const struct command_t *command) {
   return SUCCESS;
 } */
 
+
 static int pipe_chain(struct command_t *command) {
   struct command_t *curr = command;
 
@@ -537,11 +542,16 @@ static int pipe_chain(struct command_t *command) {
 
       if (prev_read != -1) close(prev_read);
 
-    
+      
       redirect(curr);
 
+      if (strcmp(curr->name, "cut") == 0) {
+        builtin_cut(curr);
+        _exit(0);
+    }
+
       pathfinder(curr->name, curr->args);
-      _exit(127);
+      _exit(1);
     }
 
     //parent bit
@@ -573,6 +583,142 @@ static int pipe_chain(struct command_t *command) {
 
   return SUCCESS;
 }
+static int parser(const char *s, int *fields, int max_fields) {
+    //parsing and storing in an array. i need to ignore commas and space
+  int count = 0;
+  const char *p = s;
+
+  while (*p && count < max_fields) {
+    // ignore commas and spaces
+    while(*p == ',' || *p == ' ' || *p == '\t') p++;
+    if (!*p) {
+      break;
+  }
+
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    //invalid cases
+    if (end == p || v <= 0) return -1;
+    fields[count++] = (int)v;
+    p = end;
+
+    // for when expecting comma and end
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == ',') p++;
+  }
+
+  return count;
+}
+static int builtin_cut(struct command_t *command) {
+  char delim = '\t';
+  int fields[256];
+  int nfields = 0;
+
+  // args: [0]="cut", [1]=..., last NULL
+  for (int i = 1; i < command->arg_count - 1; i++) {
+    char *a = command->args[i];
+    if (!a) continue;
+
+    if (strcmp(a, "-d") == 0 || strcmp(a, "--delimiter") == 0) {
+      if (i + 1 >= command->arg_count - 1 || !command->args[i + 1]) {
+        fprintf(stderr, "-%s: cut: option %s requires an argument\n", sysname, a);
+        return SUCCESS;
+      }
+      char *d = command->args[++i];
+      if (strlen(d) != 1) {
+        fprintf(stderr, "-%s: cut: delimiter must be a single character\n", sysname);
+        return SUCCESS;
+      }
+      delim = d[0];
+    } else if (strcmp(a, "-f") == 0 || strcmp(a, "--fields") == 0) {
+      if (i + 1 >= command->arg_count - 1 || !command->args[i + 1]) {
+        fprintf(stderr, "-%s: cut: option %s requires an argument\n", sysname, a);
+        return SUCCESS;
+      }
+      char *f = command->args[++i];
+      nfields = parser(f, fields, 256);
+      if (nfields <= 0) {
+        fprintf(stderr, "-%s: cut: invalid fields list '%s'\n", sysname, f);
+        return SUCCESS;
+      }
+    } else {
+      
+      fprintf(stderr, "-%s: cut: unknown option '%s'\n", sysname, a);
+      // return SUCCESS; not sure if i should add this
+    }
+  }
+
+  if (nfields == 0) {
+    fprintf(stderr, "-%s: cut: missing -f/--fields\n", sysname);
+    return SUCCESS;
+  }
+
+  char line[8192];
+  while (fgets(line, sizeof(line), stdin)) {
+    cut_line(line, delim, fields, nfields);
+  }
+
+  return SUCCESS;
+}
+static void cut_line(const char *line, char delim, const int *fields, int nfields) {
+  // Split line into fields. then print them
+
+  int next_ind = 0;      
+  int field_ind = 1;    // currently
+
+  const char *start = line;
+  const char *p = line;
+
+  // need first per line
+  int first_out = 1;
+
+  while (1) {
+    if (*p == delim || *p == '\n' || *p == '\0') {
+      // current field is [start, p)
+      while (next_ind < nfields && fields[next_ind] == field_ind) {
+        if (!first_out) putchar(delim);
+        fwrite(start, 1, (size_t)(p - start), stdout);
+        first_out = 0;
+        next_ind++;
+      }
+
+      if (*p == delim) {
+        field_ind++;
+        p++;
+        start = p;
+        continue;
+      }
+      break; // EOL
+    }
+    p++;
+  }
+
+  putchar('\n');
+}
+
+
+static int run_cut_builtin(struct command_t *command) {
+  pid_t pid = fork();
+  if (pid < 0) {
+    perror("fork");
+    return SUCCESS;
+  }
+
+  if (pid == 0) {
+    redirect(command);     // makes < > >> work for cut
+    builtin_cut(command);  // reads stdin, writes stdout
+    _exit(0);
+  }
+
+  if (command->background) {
+    printf("[bg] pid %d\n", pid);
+    return SUCCESS;
+  }
+
+  waitpid(pid, NULL, 0);
+  return SUCCESS;
+}
+
 
 int process_command(struct command_t *command) {
   //int r;
@@ -594,6 +740,9 @@ int process_command(struct command_t *command) {
 
     return SUCCESS;
   }
+  if (strcmp(command->name, "cut") == 0) {
+    return run_cut_builtin(command);
+}
 
   if (command->next != NULL) {
     return pipe_chain(command);
