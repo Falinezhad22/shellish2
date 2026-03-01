@@ -6,6 +6,8 @@
 #include <sys/wait.h>
 #include <termios.h> // termios, TCSANOW, ECHO, ICANON
 #include <unistd.h>
+#include <sys/types.h>
+#define _POSIX_C_SOURC 200809L
 const char *sysname = "shellish";
 
 enum return_codes {
@@ -52,12 +54,13 @@ void print_command(struct command_t *command) {
  * @return         [description]
  */
 int free_command(struct command_t *command) {
+  int i = 0;
   if (command->arg_count) {
-    for (int i = 0; i < command->arg_count; ++i)
+    for (i = 0; i < command->arg_count; ++i)
       free(command->args[i]);
     free(command->args);
   }
-  for (int i = 0; i < 3; ++i)
+  for (i = 0; i < 3; ++i)
     if (command->redirects[i])
       free(command->redirects[i]);
   if (command->next) {
@@ -197,7 +200,8 @@ int parse_command(char *buf, struct command_t *command) {
                                    sizeof(char *) * (command->arg_count += 2));
 
   // shift everything forward by 1
-  for (int i = command->arg_count - 2; i > 0; --i)
+  int i =  0;
+  for (i = command->arg_count - 2; i > 0; --i)
     command->args[i] = command->args[i - 1];
 
   // set args[0] as a copy of name
@@ -310,7 +314,7 @@ static void the_reaper(void) {
   int stat;
   pid_t p;
   while ((p = waitpid(-1, &stat, WNOHANG)) > 0) {
-    // fprintf(stderr, "[bg done] pid %d\n", p);
+     fprintf(stderr, "[bg done] pid %d\n", p);
   }
 }
 static void pathfinder(char *name, char *const argv[]) {
@@ -372,7 +376,7 @@ int process_command(struct command_t *command) {
 
     return SUCCESS;
   }
-  }
+
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -410,6 +414,7 @@ int process_command(struct command_t *command) {
     return SUCCESS;              
   }
 }
+
 
 
 int main() {
