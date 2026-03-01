@@ -1,3 +1,4 @@
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -7,7 +8,11 @@
 #include <termios.h> // termios, TCSANOW, ECHO, ICANON
 #include <unistd.h>
 #include <sys/types.h>
-#define _POSIX_C_SOURC 200809L
+#include <fcntl.h>
+#define READ_END 0
+#define WRITE_END 1
+//#define _POSIX_C_SOURC 200809L
+
 const char *sysname = "shellish";
 
 enum return_codes {
@@ -303,7 +308,7 @@ int prompt(struct command_t *command) {
 
   parse_command(buf, command);
 
-  // print_command(command); // DEBUG: uncomment for debugging
+  print_command(command); // DEBUG: uncomment for debugging
 
   // restore the old settings
   tcsetattr(STDIN_FILENO, TCSANOW, &backup_termios);
@@ -356,8 +361,129 @@ static void pathfinder(char *name, char *const argv[]) {
   _exit(1);
 }
 
+static void redirect(const struct command_t *command) {
+  int fd;
+  // for input redirect
+  if (command->redirects[0]) {
+    fd = open(command->redirects[0], O_RDONLY);
+    if (fd < 0) {
+      fprintf(stderr, "-%s: cannot open input '%s': %s\n",
+              sysname, command->redirects[0], strerror(errno));
+      _exit(1);
+    }
+    if (dup2(fd, STDIN_FILENO) < 0) {
+      perror("dup2 stdin");
+      close(fd);
+      _exit(1);
+    }
+    close(fd);
+  }
+
+  //truncate
+  if (command->redirects[1]) {
+    fd = open(command->redirects[1], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+      fprintf(stderr, "-%s: cannot open output '%s': %s\n",
+              sysname, command->redirects[1], strerror(errno));
+      _exit(1);
+    }
+    if (dup2(fd, STDOUT_FILENO) < 0) {
+      perror("dup2 stdout");
+      close(fd);
+      _exit(1);
+    }
+    close(fd);
+  }
+
+  //append
+  if (command->redirects[2]) {
+    fd = open(command->redirects[2], O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) {
+      fprintf(stderr, "-%s: cannot open append '%s': %s\n",
+              sysname, command->redirects[2], strerror(errno));
+      _exit(1);
+    }
+    if (dup2(fd, STDOUT_FILENO) < 0) {
+      perror("dup2 stdout");
+      close(fd);
+      _exit(1);
+    }
+    close(fd);
+  }
+}
+
+static int pipe_two(struct command_t *command) {
+  int fd[2];
+  pid_t pid1, pid2;
+
+  if (pipe(fd) == -1) {
+    fprintf(stderr, "Pipe fail\n");
+    return SUCCESS;
+  }
+
+  //first child
+  pid1 = fork();
+  if (pid1 < 0) {
+    perror("fork");
+    close(fd[READ_END]);
+    close(fd[WRITE_END]);
+    return SUCCESS;
+  }
+
+  if (pid1 == 0) {
+    // left command writes into pipe
+    close(fd[READ_END]);
+    if (dup2(fd[WRITE_END], STDOUT_FILENO) < 0) {
+      perror("dup2");
+      _exit(1);
+    }
+    close(fd[WRITE_END]);
+    redirect(command);
+    pathfinder(command->name, command->args);
+    _exit(1);
+  }
+
+  //second child
+  pid2 = fork();
+  if (pid2 < 0) {
+    perror("fork");
+    close(fd[READ_END]);
+    close(fd[WRITE_END]);
+    return SUCCESS;
+  }
+
+  if (pid2 == 0) {
+    // right command reads from pipe
+    close(fd[WRITE_END]);
+    if (dup2(fd[READ_END], STDIN_FILENO) < 0) {
+      perror("dup2");
+      _exit(1);
+    }
+    close(fd[READ_END]);
+
+    redirect(command->next);         
+    pathfinder(command->next->name, command->next->args);
+    _exit(1);
+  }
+
+  //parent closing both ends
+  close(fd[READ_END]);
+  close(fd[WRITE_END]);
+
+  // wait unless bg process
+  if (!command->background) {
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
+  } else {
+    // for the last command
+    printf("[bg] pid %d\n", pid2);   
+  }
+
+  return SUCCESS;
+}
+
 int process_command(struct command_t *command) {
-  int r;
+  //int r;
   the_reaper();
   if (strcmp(command->name, "") == 0)
     return SUCCESS;
@@ -377,6 +503,10 @@ int process_command(struct command_t *command) {
     return SUCCESS;
   }
 
+  if (command->next != NULL) {
+    return pipe_two(command);
+  }
+
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -385,6 +515,7 @@ int process_command(struct command_t *command) {
   }
   if (pid == 0) // child 
   {
+    redirect(command);
     pathfinder(command->name, command->args);
     _exit(1); 
     /// This shows how to do exec with environ (but is not available on MacOs)
